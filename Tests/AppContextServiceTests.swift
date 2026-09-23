@@ -30,6 +30,7 @@ struct AppContextServiceTests {
         MouseDictationButtonTests.run()
         SmartCleanupValidationTests.run()
         StructuredOutputUnwrapTests.run()
+        OpenAITranscriptionServiceTests.run()
         print("MegaphoneTests passed")
     }
 

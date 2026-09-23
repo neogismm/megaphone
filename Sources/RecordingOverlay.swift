@@ -11,6 +11,9 @@ final class RecordingOverlayState: ObservableObject {
     @Published var updateVersion: String = ""
     @Published var errorMessage: String?
     @Published var toastID: UUID?
+    /// Engine actually driving this session — drives the overlay tint and
+    /// glyph, so a network-forced Apple fallback reads green, not blue.
+    @Published var engine: TranscriptionEngine = .appleOnDevice
 }
 
 enum OverlayPhase {
@@ -128,33 +131,48 @@ final class RecordingOverlayManager {
             || overlayState.phase == .updateAvailable
     }
 
-    func showInitializing(mode: RecordingTriggerMode = .hold, isCommandMode: Bool = false) {
+    func showInitializing(
+        mode: RecordingTriggerMode = .hold,
+        isCommandMode: Bool = false,
+        engine: TranscriptionEngine = .appleOnDevice
+    ) {
         DispatchQueue.main.async {
             self.lockedOverlayWidth = nil
             self.overlayState.recordingTriggerMode = mode
             self.overlayState.isCommandMode = isCommandMode
+            self.overlayState.engine = engine
             self.overlayState.phase = .initializing
             self.overlayState.audioLevel = 0
             self.showOverlayPanel(animatedResize: false)
         }
     }
 
-    func showRecording(mode: RecordingTriggerMode = .hold, isCommandMode: Bool = false) {
+    func showRecording(
+        mode: RecordingTriggerMode = .hold,
+        isCommandMode: Bool = false,
+        engine: TranscriptionEngine = .appleOnDevice
+    ) {
         DispatchQueue.main.async {
             self.lockedOverlayWidth = nil
             self.overlayState.recordingTriggerMode = mode
             self.overlayState.isCommandMode = isCommandMode
+            self.overlayState.engine = engine
             self.overlayState.phase = .recording
             self.overlayState.audioLevel = 0
             self.showOverlayPanel(animatedResize: true)
         }
     }
 
-    func transitionToRecording(mode: RecordingTriggerMode = .hold, isCommandMode: Bool = false) {
+    func transitionToRecording(
+        mode: RecordingTriggerMode = .hold,
+        isCommandMode: Bool = false,
+        engine: TranscriptionEngine = .appleOnDevice
+    ) {
         DispatchQueue.main.async {
             self.lockedOverlayWidth = nil
             self.overlayState.recordingTriggerMode = mode
             self.overlayState.isCommandMode = isCommandMode
+            self.overlayState.engine = engine
             self.overlayState.phase = .recording
             self.updateOverlayLayout(animated: true)
         }
@@ -173,8 +191,9 @@ final class RecordingOverlayManager {
         }
     }
 
-    func showTranscribing() {
+    func showTranscribing(engine: TranscriptionEngine = .appleOnDevice) {
         DispatchQueue.main.async {
+            self.overlayState.engine = engine
             self.setTranscribingPhase()
         }
     }
@@ -486,6 +505,17 @@ struct WingedRecordingView: View {
         showsLiveRecordingContent && state.recordingTriggerMode == .toggle
     }
 
+    /// The engine glyph is opportunistic: it renders only when the right wing
+    /// is otherwise free. The stop button and the failure X outrank it, and
+    /// the glyph never widens the overlay to make room for itself.
+    private var showsEngineGlyph: Bool {
+        switch state.phase {
+        case .recording:    return !showsStopButton
+        case .transcribing: return true
+        default:            return false
+        }
+    }
+
     var body: some View {
         wingsHStack
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -501,7 +531,7 @@ struct WingedRecordingView: View {
                     if state.phase == .feedback {
                         Color.clear
                     } else if state.phase == .initializing {
-                        InitializingDotsView()
+                        InitializingDotsView(tint: state.engine.overlayTint)
                             .transition(.opacity)
                     } else if showsLiveRecordingContent {
                         // Command-mode pencil sits directly above and centered
@@ -518,12 +548,13 @@ struct WingedRecordingView: View {
                             }
                             CompactWaveformView(
                                 audioLevel: state.audioLevel,
-                                showsActivityPulse: state.phase == .recording
+                                showsActivityPulse: state.phase == .recording,
+                                tint: state.engine.overlayTint
                             )
                         }
                         .transition(.opacity)
                     } else {
-                        CompactProcessingIndicatorView()
+                        CompactProcessingIndicatorView(tint: state.engine.overlayTint)
                             .transition(.opacity)
                     }
                 }
@@ -557,6 +588,11 @@ struct WingedRecordingView: View {
                         }
                         .buttonStyle(.plain)
                         .transition(.opacity)
+                    } else if showsEngineGlyph {
+                        Image(systemName: state.engine.overlaySymbolName)
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(state.engine.overlayTint.opacity(0.92))
+                            .transition(.opacity)
                     }
                 }
                 Spacer(minLength: 0)
@@ -572,13 +608,14 @@ struct WingedRecordingView: View {
 
 struct WaveformBar: View {
     let amplitude: CGFloat
+    var tint: Color = .white
 
     private let minHeight: CGFloat = 2
     private let maxHeight: CGFloat = 22
 
     var body: some View {
         Capsule()
-            .fill(.white)
+            .fill(tint)
             .frame(width: 3, height: minHeight + (maxHeight - minHeight) * amplitude)
     }
 }
@@ -586,6 +623,7 @@ struct WaveformBar: View {
 struct WaveformView: View {
     let audioLevel: Float
     var showsActivityPulse = false
+    var tint: Color = .white
 
     private static let barCount = 9
     private static let multipliers: [CGFloat] = [0.35, 0.55, 0.75, 0.9, 1.0, 0.9, 0.75, 0.55, 0.35]
@@ -607,7 +645,7 @@ struct WaveformView: View {
     private func waveformBars(pulseTime: TimeInterval?) -> some View {
         HStack(spacing: 2.5) {
             ForEach(0..<Self.barCount, id: \.self) { index in
-                WaveformBar(amplitude: barAmplitude(for: index, pulseTime: pulseTime))
+                WaveformBar(amplitude: barAmplitude(for: index, pulseTime: pulseTime), tint: tint)
                     .animation(
                         .spring(
                             response: barResponse(for: index),
@@ -651,6 +689,7 @@ struct WaveformView: View {
 struct CompactWaveformView: View {
     let audioLevel: Float
     var showsActivityPulse = false
+    var tint: Color = .white
 
     private static let barCount = 5
     private static let multipliers: [CGFloat] = [0.5, 0.75, 1.0, 0.75, 0.5]
@@ -672,7 +711,7 @@ struct CompactWaveformView: View {
     private func bars(pulseTime: TimeInterval?) -> some View {
         HStack(spacing: 1.5) {
             ForEach(0..<Self.barCount, id: \.self) { index in
-                CompactWaveformBar(amplitude: amplitude(for: index, pulseTime: pulseTime))
+                CompactWaveformBar(amplitude: amplitude(for: index, pulseTime: pulseTime), tint: tint)
                     .animation(
                         .spring(response: 0.18, dampingFraction: 0.88),
                         value: audioLevel
@@ -696,17 +735,20 @@ struct CompactWaveformView: View {
 
 struct CompactWaveformBar: View {
     let amplitude: CGFloat
+    var tint: Color = .white
     private let minHeight: CGFloat = 2
     private let maxHeight: CGFloat = 14
 
     var body: some View {
         Capsule()
-            .fill(.white)
+            .fill(tint)
             .frame(width: 2, height: minHeight + (maxHeight - minHeight) * amplitude)
     }
 }
 
 struct ProcessingWaveformView: View {
+    var tint: Color = .white
+
     private static let barCount = 5
     private static let centerIndex = CGFloat((barCount - 1) / 2)
 
@@ -718,7 +760,8 @@ struct ProcessingWaveformView: View {
                 ForEach(0..<Self.barCount, id: \.self) { index in
                     ProcessingPill(
                         amplitude: amplitude(for: index, time: time),
-                        opacity: opacity(for: index, time: time)
+                        opacity: opacity(for: index, time: time),
+                        tint: tint
                     )
                 }
             }
@@ -753,19 +796,22 @@ struct ProcessingWaveformView: View {
 private struct ProcessingPill: View {
     let amplitude: CGFloat
     let opacity: CGFloat
+    var tint: Color = .white
 
     private let minHeight: CGFloat = 4
     private let maxHeight: CGFloat = 18
 
     var body: some View {
         Capsule()
-            .fill(.white)
+            .fill(tint)
             .frame(width: 4, height: minHeight + (maxHeight - minHeight) * amplitude)
             .opacity(opacity)
     }
 }
 
 struct ProcessingIndicatorView: View {
+    var tint: Color = .white
+
     @State private var showsExtendedSpinner = false
     @State private var rotation: Double = 0
 
@@ -774,7 +820,7 @@ struct ProcessingIndicatorView: View {
             if showsExtendedSpinner {
                 Circle()
                     .trim(from: 0.1, to: 0.9)
-                    .stroke(Color.white, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                    .stroke(tint, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
                     .frame(width: 16, height: 16)
                     .rotationEffect(.degrees(rotation))
                     .frame(height: 20)
@@ -787,7 +833,7 @@ struct ProcessingIndicatorView: View {
                         }
                     }
             } else {
-                ProcessingWaveformView()
+                ProcessingWaveformView(tint: tint)
                     .transition(.opacity)
             }
         }
@@ -809,6 +855,8 @@ struct ProcessingIndicatorView: View {
 /// spinner so the indicator stays inside the wing without the jolt to
 /// oversized capsules that the full-size indicator produced.
 struct CompactProcessingIndicatorView: View {
+    var tint: Color = .white
+
     @State private var showsExtendedSpinner = false
     @State private var rotation: Double = 0
 
@@ -817,7 +865,7 @@ struct CompactProcessingIndicatorView: View {
             if showsExtendedSpinner {
                 Circle()
                     .trim(from: 0.1, to: 0.9)
-                    .stroke(Color.white, style: StrokeStyle(lineWidth: 2.0, lineCap: .round))
+                    .stroke(tint, style: StrokeStyle(lineWidth: 2.0, lineCap: .round))
                     .frame(width: 12, height: 12)
                     .rotationEffect(.degrees(rotation))
                     .frame(height: 18)
@@ -830,7 +878,7 @@ struct CompactProcessingIndicatorView: View {
                         }
                     }
             } else {
-                CompactProcessingWaveformView()
+                CompactProcessingWaveformView(tint: tint)
                     .transition(.opacity)
             }
         }
@@ -848,6 +896,8 @@ struct CompactProcessingIndicatorView: View {
 }
 
 struct CompactProcessingWaveformView: View {
+    var tint: Color = .white
+
     private static let barCount = 5
     private static let centerIndex = CGFloat((barCount - 1) / 2)
 
@@ -858,7 +908,8 @@ struct CompactProcessingWaveformView: View {
                 ForEach(0..<Self.barCount, id: \.self) { index in
                     CompactProcessingPill(
                         amplitude: amplitude(for: index, time: time),
-                        opacity: opacity(for: index, time: time)
+                        opacity: opacity(for: index, time: time),
+                        tint: tint
                     )
                 }
             }
@@ -893,19 +944,22 @@ struct CompactProcessingWaveformView: View {
 private struct CompactProcessingPill: View {
     let amplitude: CGFloat
     let opacity: CGFloat
+    var tint: Color = .white
 
     private let minHeight: CGFloat = 2
     private let maxHeight: CGFloat = 12
 
     var body: some View {
         Capsule()
-            .fill(.white)
+            .fill(tint)
             .frame(width: 2, height: minHeight + (maxHeight - minHeight) * amplitude)
             .opacity(opacity)
     }
 }
 
 struct InitializingDotsView: View {
+    var tint: Color = .white
+
     @State private var activeDot = 0
     @State private var timer: Timer?
 
@@ -913,7 +967,7 @@ struct InitializingDotsView: View {
         HStack(spacing: 4) {
             ForEach(0..<3, id: \.self) { index in
                 Circle()
-                    .fill(.white.opacity(activeDot == index ? 0.9 : 0.25))
+                    .fill(tint.opacity(activeDot == index ? 0.9 : 0.25))
                     .frame(width: 4.5, height: 4.5)
                     .animation(.easeInOut(duration: 0.4), value: activeDot)
             }
@@ -949,6 +1003,14 @@ struct RecordingOverlayView: View {
         showsLiveRecordingContent && state.recordingTriggerMode == .toggle
     }
 
+    /// Command mode owns the leading slot with its pencil, so the glyph only
+    /// appears when that slot is free. It fits inside the width the pill
+    /// already has — `setTranscribingPhase()` locks that width on purpose.
+    private var showsEngineGlyph: Bool {
+        guard !state.isCommandMode else { return false }
+        return state.phase == .recording || state.phase == .transcribing
+    }
+
     var body: some View {
         Group {
             if state.phase == .feedback, let message = state.errorMessage {
@@ -961,16 +1023,17 @@ struct RecordingOverlayView: View {
                 ZStack {
                     Group {
                         if state.phase == .initializing {
-                            InitializingDotsView()
+                            InitializingDotsView(tint: state.engine.overlayTint)
                                 .transition(.opacity)
                         } else if showsLiveRecordingContent {
                             WaveformView(
                                 audioLevel: state.audioLevel,
-                                showsActivityPulse: state.phase == .recording
+                                showsActivityPulse: state.phase == .recording,
+                                tint: state.engine.overlayTint
                             )
                                 .transition(.opacity)
                         } else {
-                            ProcessingIndicatorView()
+                            ProcessingIndicatorView(tint: state.engine.overlayTint)
                                 .transition(.opacity)
                         }
                     }
@@ -979,6 +1042,11 @@ struct RecordingOverlayView: View {
                         Group {
                             if state.isCommandMode {
                                 CommandModeIndicator()
+                                    .transition(.opacity)
+                            } else if showsEngineGlyph {
+                                Image(systemName: state.engine.overlaySymbolName)
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(state.engine.overlayTint.opacity(0.92))
                                     .transition(.opacity)
                             }
                         }

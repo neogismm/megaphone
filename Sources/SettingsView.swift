@@ -265,6 +265,7 @@ struct GeneralSettingsView: View {
     @State private var micPermissionGranted = false
     @State private var showMutedHint = false
     @State private var copiedBuildInfo = false
+    @State private var openAIKeyPresent = false
     @State private var copiedBuildInfoResetWorkItem: DispatchWorkItem?
     @StateObject private var githubCache = GitHubMetadataCache.shared
     @ObservedObject private var updateManager = UpdateManager.shared
@@ -439,6 +440,9 @@ struct GeneralSettingsView: View {
                 }
                 SettingsCard("Transcription", icon: "waveform") {
                     OnDeviceTranscriptionSettings()
+                }
+                SettingsCard("Transcription Engine", icon: "cpu") {
+                    transcriptionEngineSection
                 }
                 SettingsCard("Cleanup", icon: "sparkles") {
                     cleanupSection
@@ -705,6 +709,58 @@ struct GeneralSettingsView: View {
             Text("Smart cleanup translates the final text into this language. Exact mode always keeps the spoken language.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: Transcription Engine
+
+    private var transcriptionEngineSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("Engine", selection: $appState.transcriptionEngine) {
+                ForEach(TranscriptionEngine.allCases) { engine in
+                    Text(engine.title).tag(engine)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Text(transcriptionEngineDescription)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if appState.transcriptionEngine == .openAI {
+                Text("The API key is read from \(OpenAIKeyStore.keyFilePath). Megaphone never asks for it and never stores it itself.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 8) {
+                    if openAIKeyPresent {
+                        Label("Key found", systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                    } else {
+                        Label("No key file found", systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
+
+                    Button("Recheck") {
+                        OpenAIKeyStore.reload()
+                        openAIKeyPresent = OpenAIKeyStore.currentKey() != nil
+                    }
+                    .buttonStyle(.link)
+                }
+                .font(.caption)
+                .onAppear {
+                    openAIKeyPresent = OpenAIKeyStore.currentKey() != nil
+                }
+            }
+        }
+    }
+
+    private var transcriptionEngineDescription: String {
+        switch appState.transcriptionEngine {
+        case .appleOnDevice:
+            return "Transcribes on this Mac. Nothing leaves the machine, and it works offline."
+        case .openAI:
+            return "Uploads each finished recording to OpenAI's gpt-transcribe. Falls back to Apple when you are offline or the key is missing."
         }
     }
 

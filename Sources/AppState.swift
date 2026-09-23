@@ -228,6 +228,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let customVocabularyStorageKey = "custom_vocabulary"
     private let wordCorrectionsStorageKey = "word_corrections"
     private let smartCleanupModeStorageKey = "smart_cleanup_mode"
+    private let transcriptionEngineStorageKey = "transcription_engine"
     private let transcriptionLanguageStorageKey = "transcription_language"
     private let selectedMicrophoneStorageKey = "selected_microphone_id"
     private let customSystemPromptStorageKey = "custom_system_prompt"
@@ -392,6 +393,19 @@ final class AppState: ObservableObject, @unchecked Sendable {
             preserveExactWording = smartCleanupMode == .exact
         }
     }
+
+    @Published var transcriptionEngine: TranscriptionEngine {
+        didSet {
+            UserDefaults.standard.set(transcriptionEngine.rawValue,
+                                      forKey: transcriptionEngineStorageKey)
+        }
+    }
+
+    /// The engine actually used by the in-flight session. Resolved once at
+    /// record start so a mid-session network drop cannot strand the pipeline,
+    /// and so the overlay signals what is really happening rather than what
+    /// the setting says.
+    private var activeSessionEngine: TranscriptionEngine = .appleOnDevice
 
     @Published var transcriptionLanguage: String {
         didSet {
@@ -745,6 +759,10 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let smartCleanupMode = SmartCleanupMode(
             rawValue: UserDefaults.standard.string(forKey: smartCleanupModeStorageKey) ?? ""
         ) ?? (preserveExactWording ? .exact : .smart)
+        // Existing installs must not silently start uploading audio.
+        let transcriptionEngine = TranscriptionEngine(
+            rawValue: UserDefaults.standard.string(forKey: transcriptionEngineStorageKey) ?? ""
+        ) ?? .appleOnDevice
         let keepDictationInClipboardHistory = UserDefaults.standard.bool(forKey: keepDictationInClipboardHistoryStorageKey)
         let dictationAudioInterruptionEnabled = UserDefaults.standard.bool(
             forKey: dictationAudioInterruptionEnabledStorageKey
@@ -820,6 +838,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.customVocabulary = customVocabulary
         self.wordCorrections = wordCorrections
         self.smartCleanupMode = smartCleanupMode
+        self.transcriptionEngine = transcriptionEngine
         self.transcriptionLanguage = transcriptionLanguage
         self.customSystemPrompt = customSystemPrompt
         self.customContextPrompt = customContextPrompt
@@ -2282,11 +2301,35 @@ final class AppState: ObservableObject, @unchecked Sendable {
         automaticTerminationDisabled = false
     }
 
+    /// Decide the engine for this session up front, degrading to Apple when
+    /// the cloud path cannot possibly work. Resolving here rather than at
+    /// transcribe time means the user learns about the fallback while they
+    /// can still change their mind, and the overlay colour is honest from the
+    /// first frame.
+    private func resolveSessionEngine() -> (engine: TranscriptionEngine, fallbackNotice: String?) {
+        guard transcriptionEngine == .openAI else { return (transcriptionEngine, nil) }
+
+        if !NetworkMonitor.shared.isOnline {
+            return (.appleOnDevice, "No network — using Apple for this one")
+        }
+        if OpenAIKeyStore.currentKey() == nil {
+            return (.appleOnDevice, "No API key — using Apple for this one")
+        }
+        return (.openAI, nil)
+    }
+
     private func beginRecording(triggerMode: RecordingTriggerMode) {
         os_log(.info, log: recordingLog, "beginRecording() entered")
         beginCriticalDictationActivity()
         clearPendingOverlayDismissToken()
         errorMessage = nil
+
+        let sessionEngine = resolveSessionEngine()
+        activeSessionEngine = sessionEngine.engine
+        if let notice = sessionEngine.fallbackNotice {
+            os_log(.info, log: recordingLog, "engine fallback: %{public}@", notice)
+            overlayManager.showError(notice)
+        }
 
         isRecording = true
         statusText = "Starting..."
@@ -2304,7 +2347,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
             self.clearPendingOverlayDismissToken()
             self.overlayManager.showInitializing(
                 mode: self.activeRecordingTriggerMode ?? triggerMode,
-                isCommandMode: self.currentSessionIntent.isCommandMode
+                isCommandMode: self.currentSessionIntent.isCommandMode,
+                engine: self.activeSessionEngine
             )
         }
         initTimer.resume()
@@ -2321,12 +2365,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 if overlayShown {
                     self.overlayManager.transitionToRecording(
                         mode: self.activeRecordingTriggerMode ?? triggerMode,
-                        isCommandMode: self.currentSessionIntent.isCommandMode
+                        isCommandMode: self.currentSessionIntent.isCommandMode,
+                        engine: self.activeSessionEngine
                     )
                 } else {
                     self.overlayManager.showRecording(
                         mode: self.activeRecordingTriggerMode ?? triggerMode,
-                        isCommandMode: self.currentSessionIntent.isCommandMode
+                        isCommandMode: self.currentSessionIntent.isCommandMode,
+                        engine: self.activeSessionEngine
                     )
                 }
                 overlayShown = true
@@ -2341,7 +2387,12 @@ final class AppState: ObservableObject, @unchecked Sendable {
             }
         }
 
-        startNativeStreamingSession()
+        // Starting the Apple analyzer while OpenAI owns this session would
+        // force the speech-model download and burn CPU producing a transcript
+        // nobody reads.
+        if activeSessionEngine == .appleOnDevice {
+            startNativeStreamingSession()
+        }
         let cleanupSessionID = UUID()
         smartCleanupSessionID = cleanupSessionID
         if smartCleanupMode == .smart || currentSessionIntent.isCommandMode {
@@ -2431,6 +2482,27 @@ final class AppState: ObservableObject, @unchecked Sendable {
     /// classifying by the locale-independent `URLError.Code` rather than the
     /// system's English description (which varies across releases and locales).
     private func formattedTranscriptionError(_ error: Error) -> String {
+        if let openAIError = error as? OpenAITranscriptionError {
+            // Kept under RecordingOverlayManager's 90-character toast cap so
+            // the message is never truncated mid-path.
+            switch openAIError {
+            case .missingAPIKey:
+                return "No API key — add \(OpenAIKeyStore.keyFilePath)"
+            case .unauthorized:
+                return "OpenAI rejected the key — check \(OpenAIKeyStore.keyFilePath)"
+            case .fileTooLarge:
+                return "Recording too long for OpenAI (25 MB limit)"
+            case .rateLimited:
+                return "OpenAI rate limited — record again shortly"
+            case .serverError, .malformedResponse:
+                return "OpenAI failed after 3 tries — record again"
+            case .badRequest:
+                return "OpenAI rejected the request — record again"
+            case .emptyTranscript:
+                return "OpenAI heard nothing — record again"
+            }
+        }
+
         if let code = Self.urlErrorCode(in: error) {
             switch code {
             case .notConnectedToInternet, .networkConnectionLost,
@@ -2856,12 +2928,58 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
     }
 
-    /// Resolve the final transcript, trying sources in priority order:
+    /// Split `speechRecognitionVocabulary` into discrete terms, matching the
+    /// splitting `SpeechAnalyzerService.vocabularyContext` performs for the
+    /// Apple path so both engines get the same hints.
+    static func keywordList(from rawVocabulary: String) -> [String] {
+        rawVocabulary
+            .split { $0 == "," || $0.isNewline }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// `transcriptionLanguage` is a BCP-47 code or the literal "auto".
+    /// Auto-detect is expressed by omitting the field entirely.
+    static func languageHints(from transcriptionLanguage: String) -> [String] {
+        let trimmed = transcriptionLanguage.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.lowercased() != "auto" else { return [] }
+        return [trimmed]
+    }
+
+    /// Resolve the final transcript using the engine this session committed to
+    /// at record start. Everything downstream — command parsing, scratch
+    /// detection, Dictionary corrections, cleanup, paste — is engine-agnostic,
+    /// so this is the only place the two paths diverge.
+    private func resolveRawTranscript(
+        streamingSession: SpeechAnalyzerStreamingSession?,
+        fileURL: URL
+    ) async throws -> String {
+        switch activeSessionEngine {
+        case .appleOnDevice:
+            return try await resolveAppleRawTranscript(
+                streamingSession: streamingSession,
+                fileURL: fileURL
+            )
+        case .openAI:
+            guard let key = OpenAIKeyStore.currentKey() else {
+                throw OpenAITranscriptionError.missingAPIKey
+            }
+            return try await OpenAITranscriptionService.transcribe(
+                fileURL: fileURL,
+                apiKey: key,
+                keywords: Self.keywordList(from: speechRecognitionVocabulary),
+                languages: Self.languageHints(from: transcriptionLanguage),
+                prompt: customContextPrompt.isEmpty ? nil : customContextPrompt
+            )
+        }
+    }
+
+    /// Apple path, tried in priority order:
     ///   1. the streaming SpeechAnalyzer session — the audio was analyzed
     ///      while the user was still speaking, so this is near-instant
     ///   2. on-device analysis of the recorded file — fallback when the
     ///      streaming session failed to start or produced nothing
-    private func resolveRawTranscript(
+    private func resolveAppleRawTranscript(
         streamingSession: SpeechAnalyzerStreamingSession?,
         fileURL: URL
     ) async throws -> String {
@@ -2919,7 +3037,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         statusText = "Preparing audio..."
         errorMessage = nil
         playStopSound()
-        overlayManager.showTranscribing()
+        overlayManager.showTranscribing(engine: activeSessionEngine)
         audioRecorder.stopRecording { [weak self] fileURL in
             guard let self else { return }
             guard let fileURL else {
@@ -3454,7 +3572,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private func startDebugOverlay() {
         isDebugOverlayActive = true
         clearPendingOverlayDismissToken()
-        overlayManager.showRecording()
+        // Preview the configured engine's tint, not the last session's.
+        overlayManager.showRecording(engine: transcriptionEngine)
 
         // Simulate audio levels with a timer
         var phase: Double = 0.0

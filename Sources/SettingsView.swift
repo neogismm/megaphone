@@ -265,7 +265,7 @@ struct GeneralSettingsView: View {
     @State private var micPermissionGranted = false
     @State private var showMutedHint = false
     @State private var copiedBuildInfo = false
-    @State private var openAIKeyPresent = false
+    @State private var cloudKeyPresent = false
     @State private var copiedBuildInfoResetWorkItem: DispatchWorkItem?
     @StateObject private var githubCache = GitHubMetadataCache.shared
     @ObservedObject private var updateManager = UpdateManager.shared
@@ -715,10 +715,11 @@ struct GeneralSettingsView: View {
     // MARK: Transcription Engine
 
     private var transcriptionEngineSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let engine = appState.transcriptionEngine
+        return VStack(alignment: .leading, spacing: 10) {
             Picker("Engine", selection: $appState.transcriptionEngine) {
-                ForEach(TranscriptionEngine.allCases) { engine in
-                    Text(engine.title).tag(engine)
+                ForEach(TranscriptionEngine.allCases) { option in
+                    Text(option.title).tag(option)
                 }
             }
             .pickerStyle(.segmented)
@@ -727,13 +728,13 @@ struct GeneralSettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            if appState.transcriptionEngine == .openAI {
-                Text("The API key is read from \(OpenAIKeyStore.keyFilePath). Megaphone never asks for it and never stores it itself.")
+            if let keyFilePath = engine.apiKeyFilePath {
+                Text("The API key is read from \(keyFilePath). Megaphone never asks for it and never stores it itself.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
                 HStack(spacing: 8) {
-                    if openAIKeyPresent {
+                    if cloudKeyPresent {
                         Label("Key found", systemImage: "checkmark.circle.fill")
                             .foregroundStyle(.green)
                     } else {
@@ -742,17 +743,40 @@ struct GeneralSettingsView: View {
                     }
 
                     Button("Recheck") {
-                        OpenAIKeyStore.reload()
-                        openAIKeyPresent = OpenAIKeyStore.currentKey() != nil
+                        APIKeyStore.reload(engine)
+                        refreshCloudKeyStatus()
                     }
                     .buttonStyle(.link)
                 }
                 .font(.caption)
-                .onAppear {
-                    openAIKeyPresent = OpenAIKeyStore.currentKey() != nil
-                }
             }
+
+            if engine == .gemini {
+                Toggle("Gemini Smart transcription", isOn: $appState.geminiSmartTranscription)
+                Text("Gemini removes fillers, resolves self-corrections and formats lists before Megaphone sees the text. Off returns your words verbatim.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Toggle(
+                "Run Megaphone cleanup on \(engine.providerName) results",
+                isOn: Binding(
+                    get: { appState.isLocalCleanupEnabled(for: engine) },
+                    set: { appState.setLocalCleanupEnabled($0, for: engine) }
+                )
+            )
+            Text(localCleanupDescription(for: engine))
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
+        .onAppear(perform: refreshCloudKeyStatus)
+        .onChange(of: appState.transcriptionEngine) {
+            refreshCloudKeyStatus()
+        }
+    }
+
+    private func refreshCloudKeyStatus() {
+        cloudKeyPresent = APIKeyStore.currentKey(for: appState.transcriptionEngine) != nil
     }
 
     private var transcriptionEngineDescription: String {
@@ -761,7 +785,16 @@ struct GeneralSettingsView: View {
             return "Transcribes on this Mac. Nothing leaves the machine, and it works offline."
         case .openAI:
             return "Uploads each finished recording to OpenAI's gpt-transcribe. Falls back to Apple when you are offline or the key is missing."
+        case .gemini:
+            return "Uploads each finished recording to Google's gemini-3.5-transcribe. Falls back to Apple when you are offline or the key is missing."
         }
+    }
+
+    private func localCleanupDescription(for engine: TranscriptionEngine) -> String {
+        if appState.isLocalCleanupEnabled(for: engine) {
+            return "Applies the Cleanup Mode below to \(engine.providerName) transcripts. Each engine remembers its own setting."
+        }
+        return "\(engine.providerName) transcripts are pasted as returned. Wake commands and voice macros still work; Dictionary corrections are skipped."
     }
 
     // MARK: Cleanup

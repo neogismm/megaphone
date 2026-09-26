@@ -229,6 +229,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private let wordCorrectionsStorageKey = "word_corrections"
     private let smartCleanupModeStorageKey = "smart_cleanup_mode"
     private let transcriptionEngineStorageKey = "transcription_engine"
+    private let geminiSmartTranscriptionStorageKey = "gemini_smart_transcription"
+    private let localCleanupDisabledEnginesStorageKey = "local_cleanup_disabled_engines"
     private let transcriptionLanguageStorageKey = "transcription_language"
     private let selectedMicrophoneStorageKey = "selected_microphone_id"
     private let customSystemPromptStorageKey = "custom_system_prompt"
@@ -398,6 +400,25 @@ final class AppState: ObservableObject, @unchecked Sendable {
         didSet {
             UserDefaults.standard.set(transcriptionEngine.rawValue,
                                       forKey: transcriptionEngineStorageKey)
+        }
+    }
+
+    /// Ask Gemini for its server-side Smart transcription (fillers removed,
+    /// self-corrections resolved, formatting applied) instead of verbatim.
+    @Published var geminiSmartTranscription: Bool {
+        didSet {
+            UserDefaults.standard.set(geminiSmartTranscription,
+                                      forKey: geminiSmartTranscriptionStorageKey)
+        }
+    }
+
+    /// Engines whose results skip Megaphone's own cleanup and are pasted as
+    /// the engine returned them (Exact). Stored as the *disabled* set so a
+    /// missing entry — every existing install — means cleanup stays on.
+    @Published private(set) var localCleanupDisabledEngines: Set<TranscriptionEngine> {
+        didSet {
+            UserDefaults.standard.set(localCleanupDisabledEngines.map(\.rawValue).sorted(),
+                                      forKey: localCleanupDisabledEnginesStorageKey)
         }
     }
 
@@ -763,6 +784,11 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let transcriptionEngine = TranscriptionEngine(
             rawValue: UserDefaults.standard.string(forKey: transcriptionEngineStorageKey) ?? ""
         ) ?? .appleOnDevice
+        let geminiSmartTranscription = UserDefaults.standard.bool(forKey: geminiSmartTranscriptionStorageKey)
+        let localCleanupDisabledEngines = Set(
+            (UserDefaults.standard.stringArray(forKey: localCleanupDisabledEnginesStorageKey) ?? [])
+                .compactMap(TranscriptionEngine.init(rawValue:))
+        )
         let keepDictationInClipboardHistory = UserDefaults.standard.bool(forKey: keepDictationInClipboardHistoryStorageKey)
         let dictationAudioInterruptionEnabled = UserDefaults.standard.bool(
             forKey: dictationAudioInterruptionEnabledStorageKey
@@ -839,6 +865,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
         self.wordCorrections = wordCorrections
         self.smartCleanupMode = smartCleanupMode
         self.transcriptionEngine = transcriptionEngine
+        self.geminiSmartTranscription = geminiSmartTranscription
+        self.localCleanupDisabledEngines = localCleanupDisabledEngines
         self.transcriptionLanguage = transcriptionLanguage
         self.customSystemPrompt = customSystemPrompt
         self.customContextPrompt = customContextPrompt
@@ -1214,7 +1242,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
                     customSystemPrompt: capturedCustomSystemPrompt,
                     customContextPrompt: self.customContextPrompt,
                     outputLanguage: self.outputLanguage,
-                    cleanupMode: self.smartCleanupMode,
+                    // The re-run transcribes on-device, so Apple's switch applies.
+                    cleanupMode: self.effectiveCleanupMode(for: .appleOnDevice),
                     wakeCommandsEnabled: self.wakeCommandsEnabled,
                     plainMegaphoneWakeWordEnabled: self.plainMegaphoneWakeWordEnabled
                 )
@@ -2307,15 +2336,36 @@ final class AppState: ObservableObject, @unchecked Sendable {
     /// can still change their mind, and the overlay colour is honest from the
     /// first frame.
     private func resolveSessionEngine() -> (engine: TranscriptionEngine, fallbackNotice: String?) {
-        guard transcriptionEngine == .openAI else { return (transcriptionEngine, nil) }
+        guard transcriptionEngine.isCloud else { return (transcriptionEngine, nil) }
 
         if !NetworkMonitor.shared.isOnline {
             return (.appleOnDevice, "No network — using Apple for this one")
         }
-        if OpenAIKeyStore.currentKey() == nil {
-            return (.appleOnDevice, "No API key — using Apple for this one")
+        if APIKeyStore.currentKey(for: transcriptionEngine) == nil {
+            return (.appleOnDevice, "No \(transcriptionEngine.providerName) key — using Apple for this one")
         }
-        return (.openAI, nil)
+        return (transcriptionEngine, nil)
+    }
+
+    // MARK: Per-engine cleanup
+
+    func isLocalCleanupEnabled(for engine: TranscriptionEngine) -> Bool {
+        !localCleanupDisabledEngines.contains(engine)
+    }
+
+    func setLocalCleanupEnabled(_ enabled: Bool, for engine: TranscriptionEngine) {
+        if enabled {
+            localCleanupDisabledEngines.remove(engine)
+        } else {
+            localCleanupDisabledEngines.insert(engine)
+        }
+    }
+
+    /// The global Cleanup Mode, unless this engine's cleanup is switched off,
+    /// in which case its text is pasted as returned. Commands, wake phrases
+    /// and voice macros are unaffected either way.
+    func effectiveCleanupMode(for engine: TranscriptionEngine) -> SmartCleanupMode {
+        isLocalCleanupEnabled(for: engine) ? smartCleanupMode : .exact
     }
 
     private func beginRecording(triggerMode: RecordingTriggerMode) {
@@ -2395,7 +2445,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
         let cleanupSessionID = UUID()
         smartCleanupSessionID = cleanupSessionID
-        if smartCleanupMode == .smart || currentSessionIntent.isCommandMode {
+        if effectiveCleanupMode(for: activeSessionEngine) == .smart || currentSessionIntent.isCommandMode {
             Task {
                 await AppleFoundationModelsPostProcessor.shared.prepare(
                     sessionID: cleanupSessionID,
@@ -2487,9 +2537,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
             // the message is never truncated mid-path.
             switch openAIError {
             case .missingAPIKey:
-                return "No API key — add \(OpenAIKeyStore.keyFilePath)"
+                return "No API key — add \(TranscriptionEngine.openAI.apiKeyFilePath ?? "")"
             case .unauthorized:
-                return "OpenAI rejected the key — check \(OpenAIKeyStore.keyFilePath)"
+                return "OpenAI rejected the key — check \(TranscriptionEngine.openAI.apiKeyFilePath ?? "")"
             case .fileTooLarge:
                 return "Recording too long for OpenAI (25 MB limit)"
             case .rateLimited:
@@ -2500,6 +2550,25 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 return "OpenAI rejected the request — record again"
             case .emptyTranscript:
                 return "OpenAI heard nothing — record again"
+            }
+        }
+
+        if let geminiError = error as? GeminiTranscriptionError {
+            switch geminiError {
+            case .missingAPIKey:
+                return "No API key — add \(TranscriptionEngine.gemini.apiKeyFilePath ?? "")"
+            case .unauthorized:
+                return "Gemini rejected the key — check \(TranscriptionEngine.gemini.apiKeyFilePath ?? "")"
+            case .fileTooLarge:
+                return "Recording too long for Gemini (about 7 minutes max)"
+            case .rateLimited:
+                return "Gemini rate limited — record again shortly"
+            case .serverError, .malformedResponse:
+                return "Gemini failed after 3 tries — record again"
+            case .badRequest, .interactionFailed:
+                return "Gemini rejected the request — record again"
+            case .emptyTranscript:
+                return "Gemini heard nothing — record again"
             }
         }
 
@@ -2949,7 +3018,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
     /// Resolve the final transcript using the engine this session committed to
     /// at record start. Everything downstream — command parsing, scratch
     /// detection, Dictionary corrections, cleanup, paste — is engine-agnostic,
-    /// so this is the only place the two paths diverge.
+    /// so this is the only place the engines diverge (apart from
+    /// each engine's cleanup switch, see `effectiveCleanupMode(for:)`).
     private func resolveRawTranscript(
         streamingSession: SpeechAnalyzerStreamingSession?,
         fileURL: URL
@@ -2961,7 +3031,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 fileURL: fileURL
             )
         case .openAI:
-            guard let key = OpenAIKeyStore.currentKey() else {
+            guard let key = APIKeyStore.currentKey(for: .openAI) else {
                 throw OpenAITranscriptionError.missingAPIKey
             }
             return try await OpenAITranscriptionService.transcribe(
@@ -2970,6 +3040,19 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 keywords: Self.keywordList(from: speechRecognitionVocabulary),
                 languages: Self.languageHints(from: transcriptionLanguage),
                 prompt: customContextPrompt.isEmpty ? nil : customContextPrompt
+            )
+        case .gemini:
+            guard let key = APIKeyStore.currentKey(for: .gemini) else {
+                throw GeminiTranscriptionError.missingAPIKey
+            }
+            // Gemini's transcribe model has no free-form prompt field, so
+            // `customContextPrompt` has nothing to map onto here.
+            return try await GeminiTranscriptionService.transcribe(
+                fileURL: fileURL,
+                apiKey: key,
+                mode: geminiSmartTranscription ? .smart : .verbatim,
+                vocabulary: Self.keywordList(from: speechRecognitionVocabulary),
+                languages: Self.languageHints(from: transcriptionLanguage)
             )
         }
     }
@@ -3080,6 +3163,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
                 self.refreshAvailableMicrophonesIfNeeded()
                 return
             }
+            // Captured now: a new session starting mid-pipeline must not
+            // change how this one is cleaned up.
+            let sessionCleanupMode = self.effectiveCleanupMode(for: self.activeSessionEngine)
             self.transcriptionTask = Task {
                 defer {
                     // No-op when the session already committed; releases the
@@ -3152,7 +3238,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
                         customSystemPrompt: self.customSystemPrompt,
                         customContextPrompt: self.customContextPrompt,
                         outputLanguage: self.outputLanguage,
-                        cleanupMode: self.smartCleanupMode,
+                        cleanupMode: sessionCleanupMode,
                         wakeCommandsEnabled: self.wakeCommandsEnabled,
                         plainMegaphoneWakeWordEnabled: self.plainMegaphoneWakeWordEnabled,
                         previousText: previousText,

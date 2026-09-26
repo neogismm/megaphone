@@ -589,10 +589,12 @@ struct WingedRecordingView: View {
                         .buttonStyle(.plain)
                         .transition(.opacity)
                     } else if showsEngineGlyph {
-                        Image(systemName: state.engine.overlaySymbolName)
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(state.engine.overlayTint.opacity(0.92))
-                            .transition(.opacity)
+                        TranscriptionEngineMark(
+                            engine: state.engine,
+                            size: 11,
+                            tint: state.engine.overlayTint.opacity(0.92)
+                        )
+                        .transition(.opacity)
                     }
                 }
                 Spacer(minLength: 0)
@@ -1044,10 +1046,12 @@ struct RecordingOverlayView: View {
                                 CommandModeIndicator()
                                     .transition(.opacity)
                             } else if showsEngineGlyph {
-                                Image(systemName: state.engine.overlaySymbolName)
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(state.engine.overlayTint.opacity(0.92))
-                                    .transition(.opacity)
+                                TranscriptionEngineMark(
+                                    engine: state.engine,
+                                    size: 12,
+                                    tint: state.engine.overlayTint.opacity(0.92)
+                                )
+                                .transition(.opacity)
                             }
                         }
                         .frame(width: leadingAccessoryWidth, alignment: .center)

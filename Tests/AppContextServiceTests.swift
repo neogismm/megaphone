@@ -31,6 +31,7 @@ struct AppContextServiceTests {
         SmartCleanupValidationTests.run()
         StructuredOutputUnwrapTests.run()
         OpenAITranscriptionServiceTests.run()
+        GeminiTranscriptionServiceTests.run()
         print("MegaphoneTests passed")
     }
 

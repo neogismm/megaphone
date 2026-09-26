@@ -42,17 +42,6 @@ enum OpenAITranscriptionService {
     static let maxUploadBytes = 25 * 1024 * 1024
     static let endpoint = URL(string: "https://api.openai.com/v1/audio/transcriptions")!
 
-    /// Per-request timeout. Generous enough for a multi-minute recording on a
-    /// slow uplink, short enough that a hung socket does not strand the user.
-    static let requestTimeout: TimeInterval = 60
-
-    private static let maxAttempts = 3
-    /// Backoff before attempt 2 and attempt 3.
-    private static let backoffSeconds: [TimeInterval] = [1, 2]
-    /// A `Retry-After` longer than this fails immediately rather than
-    /// silently stalling the user with a frozen overlay.
-    private static let maxHonoredRetryAfter: TimeInterval = 10
-
     // MARK: - Public entry points
 
     /// Retry wrapper: 3 attempts total with 1s/2s backoff. See `isRetryable`
@@ -64,37 +53,23 @@ enum OpenAITranscriptionService {
         languages: [String],
         prompt: String?
     ) async throws -> String {
-        var lastError: Error?
-
-        for attempt in 0..<maxAttempts {
-            try Task.checkCancellation()
-            do {
-                return try await transcribeOnce(
-                    fileURL: fileURL,
-                    apiKey: apiKey,
-                    keywords: keywords,
-                    languages: languages,
-                    prompt: prompt
-                )
-            } catch is CancellationError {
-                throw CancellationError()
-            } catch {
-                lastError = error
-                guard attempt < maxAttempts - 1, isRetryable(error) else { throw error }
-
-                var delay = backoffSeconds[attempt]
-                if case OpenAITranscriptionError.rateLimited(let retryAfter) = error,
-                   let retryAfter {
-                    // Too long to wait behind a blocking overlay — bail now.
-                    guard retryAfter <= maxHonoredRetryAfter else { throw error }
-                    delay = max(delay, retryAfter)
+        try await CloudTranscriptionTransport.withRetries(
+            isRetryable: isRetryable,
+            retryAfter: { error in
+                if case OpenAITranscriptionError.rateLimited(let retryAfter) = error {
+                    return retryAfter
                 }
-
-                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                return nil
             }
+        ) {
+            try await transcribeOnce(
+                fileURL: fileURL,
+                apiKey: apiKey,
+                keywords: keywords,
+                languages: languages,
+                prompt: prompt
+            )
         }
-
-        throw lastError ?? OpenAITranscriptionError.malformedResponse
     }
 
     /// One attempt. No retry logic, no fallback — the caller decides.
@@ -127,40 +102,16 @@ enum OpenAITranscriptionService {
 
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        request.timeoutInterval = requestTimeout
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
 
-        // Ephemeral session per request, invalidated after: no shared cache,
-        // no cookie jar, no connection kept alive holding a key-scoped socket.
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = requestTimeout
-        configuration.timeoutIntervalForResource = requestTimeout
-        configuration.urlCache = nil
-        configuration.httpCookieStorage = nil
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        let session = URLSession(configuration: configuration)
-        defer { session.finishTasksAndInvalidate() }
-
-        let (data, response) = try await withTaskCancellationHandler {
-            try await session.data(for: request)
-        } onCancel: {
-            // Abort the in-flight upload so the cancel shortcut is immediate
-            // rather than waiting out the 60s timeout.
-            session.invalidateAndCancel()
-        }
-
-        try Task.checkCancellation()
-
-        guard let http = response as? HTTPURLResponse else {
-            throw OpenAITranscriptionError.malformedResponse
-        }
+        let (data, http) = try await CloudTranscriptionTransport.send(request)
 
         if let error = classify(status: http.statusCode, headers: http.allHeaderFields, body: data) {
             if case .unauthorized = error {
                 // Let the user fix the key file without restarting the app.
-                OpenAIKeyStore.reload()
+                APIKeyStore.reload(.openAI)
             }
             throw error
         }
@@ -248,7 +199,7 @@ enum OpenAITranscriptionService {
         case 413:
             return .fileTooLarge(bytes: 0)
         case 429:
-            return .rateLimited(retryAfter: retryAfterSeconds(in: headers))
+            return .rateLimited(retryAfter: CloudTranscriptionTransport.retryAfterSeconds(in: headers))
         case 400..<500:
             return .badRequest(errorMessage(in: body) ?? "status \(status)")
         default:
@@ -269,45 +220,10 @@ enum OpenAITranscriptionService {
             }
         }
 
-        if let urlError = error as? URLError {
-            switch urlError.code {
-            case .timedOut, .networkConnectionLost, .cannotConnectToHost,
-                 .dnsLookupFailed, .cannotFindHost, .notConnectedToInternet:
-                return true
-            default:
-                return false
-            }
-        }
-
-        return false
+        return CloudTranscriptionTransport.isRetryableNetworkError(error)
     }
 
     // MARK: - Header / body parsing
-
-    /// `Retry-After` is either delta-seconds or an HTTP-date. Accept both.
-    static func retryAfterSeconds(in headers: [AnyHashable: Any]) -> TimeInterval? {
-        let raw = headers.first { key, _ in
-            (key as? String)?.caseInsensitiveCompare("Retry-After") == .orderedSame
-        }?.value as? String
-
-        guard let value = raw?.trimmingCharacters(in: .whitespaces), !value.isEmpty else {
-            return nil
-        }
-
-        if let seconds = TimeInterval(value) {
-            return max(0, seconds)
-        }
-
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(identifier: "GMT")
-        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
-        if let date = formatter.date(from: value) {
-            return max(0, date.timeIntervalSinceNow)
-        }
-
-        return nil
-    }
 
     /// Best-effort `{"error": {"message": ...}}` extraction for 4xx bodies.
     static func errorMessage(in body: Data) -> String? {

@@ -167,11 +167,11 @@ enum OpenAITranscriptionServiceTests {
     }
 
     private static func testRetryAfterParsing() {
-        expectEqual(OpenAITranscriptionService.retryAfterSeconds(in: ["retry-after": "5"]), 5,
+        expectEqual(CloudTranscriptionTransport.retryAfterSeconds(in: ["retry-after": "5"]), 5,
                     "Header match must be case-insensitive")
-        expect(OpenAITranscriptionService.retryAfterSeconds(in: [:]) == nil,
+        expect(CloudTranscriptionTransport.retryAfterSeconds(in: [:]) == nil,
                "Missing header must yield nil")
-        expect(OpenAITranscriptionService.retryAfterSeconds(in: ["Retry-After": "later"]) == nil,
+        expect(CloudTranscriptionTransport.retryAfterSeconds(in: ["Retry-After": "later"]) == nil,
                "Unparseable header must yield nil")
     }
 

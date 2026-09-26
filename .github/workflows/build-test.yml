@@ -1,0 +1,40 @@
+name: Build and Test
+
+# Compile the app and run the unit tests on branches and pull requests, so a
+# change can be verified without a local Mac. `main` is already built by
+# dev-release.yml.
+on:
+  push:
+    branches-ignore:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    # The test runner targets macOS 26, so it must also run on macOS 26.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select latest Xcode (macOS 26 SDK required)
+        run: |
+          XCODE_APP=$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$XCODE_APP" ]; then
+            sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          fi
+          xcodebuild -version
+          xcrun --show-sdk-version
+
+      - name: Build
+        run: make CODESIGN_IDENTITY=-
+
+      - name: Test
+        run: make test

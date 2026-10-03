@@ -10,6 +10,12 @@ This project uses semantic versioning for public releases. Use `MAJOR.MINOR.PATC
 - `MINOR` changes add user-visible features and improvements.
 - `PATCH` changes fix bugs, polish existing behavior, or make small internal improvements.
 
+## [Unreleased]
+
+### Fixed
+
+- Accidentally tapping the Fn key (or any hold shortcut) no longer starts a dictation. The shortcut now has to stay down for a 200 ms start delay by default (adjustable in Settings), and any recording shorter than 0.4 s is discarded silently instead of being sent to a cloud engine and failing a few seconds later.
+
 ## [1.1.8] - 2026-07-23
 
 ### Added

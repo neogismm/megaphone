@@ -15,6 +15,7 @@ This project uses semantic versioning for public releases. Use `MAJOR.MINOR.PATC
 ### Fixed
 
 - Accidentally tapping the Fn key (or any hold shortcut) no longer starts a dictation. The shortcut now has to stay down for a 200 ms start delay by default (adjustable in Settings), and any recording shorter than 0.4 s is discarded silently instead of being sent to a cloud engine and failing a few seconds later.
+- The Shortcut Start Delay slider in Settings → Dictation Shortcuts now goes up to 1 second (was 500 ms), for anyone who still triggers dictation by brushing the key.
 
 ## [1.1.8] - 2026-07-23
 

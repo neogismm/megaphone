@@ -697,6 +697,8 @@ final class AppState: ObservableObject, @unchecked Sendable {
     /// accidental tap on the trigger key (Fn in particular) does nothing.
     /// Only applies until the user changes the setting.
     private static let defaultShortcutStartDelay: TimeInterval = 0.2
+    /// Upper bound of the Settings slider.
+    static let maximumShortcutStartDelay: TimeInterval = 1.0
     /// Recordings shorter than this are discarded instead of transcribed;
     /// they can't contain a usable utterance and would only hit the cloud
     /// engines for a guaranteed failure.
@@ -769,7 +771,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
             .dictionary(forKey: writingFormalityByContextStorageKey) as? [String: String] ?? [:]
         let shortcutStartDelay = UserDefaults.standard.object(forKey: shortcutStartDelayStorageKey) == nil
             ? Self.defaultShortcutStartDelay
-            : max(0, UserDefaults.standard.double(forKey: shortcutStartDelayStorageKey))
+            : min(max(0, UserDefaults.standard.double(forKey: shortcutStartDelayStorageKey)), Self.maximumShortcutStartDelay)
         let isCommandModeEnabled = UserDefaults.standard.object(forKey: commandModeEnabledStorageKey) == nil
             ? false
             : UserDefaults.standard.bool(forKey: commandModeEnabledStorageKey)

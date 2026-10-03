@@ -909,11 +909,11 @@ struct GeneralSettingsView: View {
 
                 Slider(
                     value: $appState.shortcutStartDelay,
-                    in: 0...0.5,
-                    step: 0.025
+                    in: 0...AppState.maximumShortcutStartDelay,
+                    step: 0.05
                 )
 
-                Text("How long a hold shortcut must stay down before recording starts, so an accidental tap does nothing. Applies to tap shortcuts too. Stopping still happens immediately.")
+                Text("How long a hold shortcut must stay down before recording starts, so an accidental tap does nothing. Raise it if quick presses still start a dictation. Applies to tap shortcuts too. Stopping still happens immediately.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

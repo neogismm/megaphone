@@ -913,7 +913,7 @@ struct GeneralSettingsView: View {
                     step: 0.025
                 )
 
-                Text("Applies before recording starts for both hold and tap shortcuts. Stopping still happens immediately.")
+                Text("How long a hold shortcut must stay down before recording starts, so an accidental tap does nothing. Applies to tap shortcuts too. Stopping still happens immediately.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

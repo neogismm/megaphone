@@ -693,6 +693,15 @@ final class AppState: ObservableObject, @unchecked Sendable {
     private var pendingManualCommandInvocation = false
     private var pendingShortcutStartTask: Task<Void, Never>?
     private var pendingShortcutStartMode: RecordingTriggerMode?
+    /// A shortcut must stay down this long before recording starts, so an
+    /// accidental tap on the trigger key (Fn in particular) does nothing.
+    /// Only applies until the user changes the setting.
+    private static let defaultShortcutStartDelay: TimeInterval = 0.2
+    /// Recordings shorter than this are discarded instead of transcribed;
+    /// they can't contain a usable utterance and would only hit the cloud
+    /// engines for a guaranteed failure.
+    private static let minimumRecordingDuration: TimeInterval = 0.4
+    private var recordingBeganAt: Date?
     private var nativeStreamingSession: SpeechAnalyzerStreamingSession?
     private var smartCleanupSessionID: UUID?
     private var automaticTerminationDisabled = false
@@ -758,7 +767,9 @@ final class AppState: ObservableObject, @unchecked Sendable {
         let outputLanguage = UserDefaults.standard.string(forKey: outputLanguageStorageKey) ?? ""
         let writingFormalityByContext = UserDefaults.standard
             .dictionary(forKey: writingFormalityByContextStorageKey) as? [String: String] ?? [:]
-        let shortcutStartDelay = max(0, UserDefaults.standard.double(forKey: shortcutStartDelayStorageKey))
+        let shortcutStartDelay = UserDefaults.standard.object(forKey: shortcutStartDelayStorageKey) == nil
+            ? Self.defaultShortcutStartDelay
+            : max(0, UserDefaults.standard.double(forKey: shortcutStartDelayStorageKey))
         let isCommandModeEnabled = UserDefaults.standard.object(forKey: commandModeEnabledStorageKey) == nil
             ? false
             : UserDefaults.standard.bool(forKey: commandModeEnabledStorageKey)
@@ -1972,7 +1983,14 @@ final class AppState: ObservableObject, @unchecked Sendable {
 
     private func cancelToggleShortcutSession() {
         guard pendingShortcutStartMode == .toggle || activeRecordingTriggerMode == .toggle else { return }
+        discardRecordingSession(announceCancel: true)
+    }
 
+    /// Tears down a recording that is not going to be transcribed. A
+    /// deliberate cancel shows "Cancelled"; an accidental short press leaves
+    /// no trace.
+    private func discardRecordingSession(announceCancel: Bool) {
+        recordingBeganAt = nil
         cancelPendingShortcutStart()
         shortcutSessionController.reset()
         isMouseHoldSessionActive = false
@@ -1988,15 +2006,15 @@ final class AppState: ObservableObject, @unchecked Sendable {
         currentSessionIntent = .dictation
         isRecording = false
         errorMessage = nil
-        debugStatusMessage = "Cancelled"
-        statusText = "Cancelled"
+        debugStatusMessage = announceCancel ? "Cancelled" : "Discarded short press"
+        statusText = announceCancel ? "Cancelled" : "Ready"
         overlayManager.dismiss()
         tearDownNativeStreamingSession()
         audioRecorder.cancelRecording()
         restoreAudioInterruptionIfNeeded()
         endCriticalDictationActivity()
         refreshAvailableMicrophonesIfNeeded()
-        if !isRecording && !isTranscribing && statusText == "Cancelled" {
+        if announceCancel && !isRecording && !isTranscribing && statusText == "Cancelled" {
             scheduleReadyStatusReset(after: 2, matching: ["Cancelled"])
         }
     }
@@ -2382,6 +2400,7 @@ final class AppState: ObservableObject, @unchecked Sendable {
         }
 
         isRecording = true
+        recordingBeganAt = Date()
         statusText = "Starting..."
 
         // Show initializing dots only if engine takes longer than 0.2s to start
@@ -3089,6 +3108,13 @@ final class AppState: ObservableObject, @unchecked Sendable {
     }
 
     private func stopAndTranscribe() {
+        if isRecording,
+           let recordingBeganAt,
+           Date().timeIntervalSince(recordingBeganAt) < Self.minimumRecordingDuration {
+            discardRecordingSession(announceCancel: false)
+            return
+        }
+        recordingBeganAt = nil
         cancelPendingShortcutStart()
         cancelRecordingInitializationTimer()
         shortcutSessionController.reset()
